@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: db_service
+    name: db-service
     runtime: python
     plan: free
     region: frankfurt
@@ -11,7 +11,7 @@ services:
     envVars:
       - key: DATABASE_URL
         fromDatabase:
-          name: fiszki_db
+          name: fiszki-db
           property: connectionString
       - key: SECRET_KEY
         generateValue: true
@@ -19,11 +19,13 @@ services:
         value: "60"
       - key: RESET_CODE
         value: "1111"
+      - key: CORS_ORIGINS
+        value: "https://fiszki-pycharm-vue.onrender.com,http://localhost:8002"
       - key: ENVIRONMENT
         value: production
 
 databases:
-  - name: fiszki_db
+  - name: fiszki-db
     databaseName: fiszki
     region: frankfurt
     plan: free
