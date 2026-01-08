@@ -24,7 +24,6 @@ services:
 
 databases:
   - name: fiszki_db
-    databaseName: fiszki_prod
+    databaseName: fiszki
     region: frankfurt
-    plan: starter
-    ipAllowList: []  # только внутренний доступ
+    plan: free
