@@ -1,35 +1,36 @@
-# database.py
-# подключение к существующему fiszki.db через SQLAlchemy (когда база из папки общей)
+# database.py в db_service
+# Подключение к PostgreSQL на Render или SQLite локально
 
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from pathlib import Path
 
-# универсальный путь: ../baza_danych/fiszki.db
-BASE_DIR = Path(__file__).parent  # корень (html/)
-DB_PATH = BASE_DIR.parent / "baza_danych" / "fiszki.db"
+# Получаем DATABASE_URL из переменной окружения
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}?check_same_thread=False"
+if DATABASE_URL:
+    # На Render: PostgreSQL
+    # Render использует postgres://, SQLAlchemy требует postgresql://
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# engine — объект подключения к SQLite
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+    engine = create_engine(DATABASE_URL)
+else:
+    # Локально: SQLite
+    DATABASE_URL = "sqlite:///./fiszki.db"
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False}
+    )
 
-# # файл fiszki.db должен лежать в этой же папке
-# SQLALCHEMY_DATABASE_URL = "sqlite:///./fiszki.db"
-#
-# # engine — объект подключения к SQLite
-# engine = create_engine(
-#     SQLALCHEMY_DATABASE_URL,
-#     connect_args={"check_same_thread": False}  # нужно для SQLite в многопоточном режиме
-# )
-
-# фабрика сессий для работы с БД
+# Фабрика сессий
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# базовый класс для всех моделей
+# Базовый класс для моделей
 Base = declarative_base()
 
-# зависимость для FastAPI: даёт сессию БД в эндпоинт и потом закрывает её
+
+# Зависимость для FastAPI
 def get_db():
     db = SessionLocal()
     try:

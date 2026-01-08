@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import func
@@ -23,6 +24,20 @@ from schemas import (
 )
 
 app = FastAPI()
+
+# CORS - разрешаем запросы от backend
+CORS_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:8002"
+).split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -------------------------------------------------
 # JWT и конфиг из окружения
@@ -447,3 +462,30 @@ async def admin_delete_user(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+from models import Base, Administrator
+from database import engine, SessionLocal
+
+
+# Создаём таблицы при старте
+@app.on_event("startup")
+def startup_event():
+    # Создаём все таблицы
+    Base.metadata.create_all(bind=engine)
+
+    # Создаём первого админа
+    db = SessionLocal()
+    try:
+        admin = db.query(Administrator).filter(Administrator.login == "admin").first()
+        if not admin:
+            new_admin = Administrator(
+                login="admin",
+                password="admin"
+            )
+            db.add(new_admin)
+            db.commit()
+            print("default admin created")
+    finally:
+        db.close()
+

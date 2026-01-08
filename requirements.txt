@@ -1,11 +1,8 @@
-fastapi==0.116.2
-uvicorn[standard]==0.35.0
-
-SQLAlchemy==2.0.31
-psycopg2-binary==2.9.9  # Postgres на Render [web:22][web:24]
-
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+sqlalchemy==2.0.23
+pydantic==2.5.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-python-multipart==0.0.9
-
-pydantic==2.11.9
+python-multipart==0.0.6
+psycopg2-binary==2.9.9
