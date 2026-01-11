@@ -25,11 +25,11 @@ from schemas import (
 
 app = FastAPI()
 
-# CORS - разрешаем запросы от backend
-CORS_ORIGINS = os.getenv(
-    "CORS_ORIGINS",
-    "http://localhost:8002"
-).split(",")
+CORS_ORIGINS = [
+    "https://fiszkiadminpanelfrontend.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:8002",
+]
 
 app.add_middleware(
     CORSMiddleware,
