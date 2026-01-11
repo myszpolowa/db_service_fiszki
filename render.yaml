@@ -20,7 +20,7 @@ services:
       - key: RESET_CODE
         value: "1111"
       - key: CORS_ORIGINS
-        value: "https://fiszki-pycharm-vue.onrender.com,http://localhost:8002"
+        value: "https://fiszki-pycharm-vue-e6ox.onrender.com,http://localhost:8002"
       - key: ENVIRONMENT
         value: production
 
