@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: db-service
+    name: fiszki-pycharm-vue
     runtime: python
     plan: free
     region: frankfurt
@@ -9,23 +9,13 @@ services:
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: fiszki-db
-          property: connectionString
+      - key: DB_SERVICE_URL
+        value: "https://db-service-v06e.onrender.com"
       - key: SECRET_KEY
         generateValue: true
       - key: ACCESS_TOKEN_EXPIRE_MINUTES
         value: "60"
-      - key: RESET_CODE
-        value: "1111"
       - key: CORS_ORIGINS
-        value: "https://fiszki-pycharm-vue.onrender.com,http://localhost:8002"
+        value: "https://fiszkiadminpanelfrontend.vercel.app,http://localhost:5173"
       - key: ENVIRONMENT
         value: production
-
-databases:
-  - name: fiszki-db
-    databaseName: fiszki
-    region: frankfurt
-    plan: free

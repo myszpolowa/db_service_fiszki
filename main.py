@@ -1,19 +1,21 @@
-# db_service/main.py
-# Точка входа FastAPI + эндпоинты под телефон и админку (DB Service)
+# main.py — Backend API for Vue admin panel with SQLite database
 
-import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from sqlalchemy import func
-from sqlalchemy.orm import Session
 
-from database import get_db  # локальная БД (SQLite локально, Postgres на Render)
-from models import Level, Question, Answer, Administrator, Login
+from jose import JWTError, jwt
+import bcrypt
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+import os
+
+from database import get_db, init_db
+from models import Admin, Level, Question, Answer, User
 from schemas import (
     LevelOut, QuestionOut, AnswerOut,
     LevelCreate, LevelUpdate,
@@ -21,43 +23,53 @@ from schemas import (
     AnswerCreate, AnswerUpdate,
     UserOut, UserCreate, UserLoginIn,
     UserChangePasswordIn, UserChangeLoginIn, UserResetPasswordIn, AdminLevelOut,
+    Token,
 )
 
-app = FastAPI()
 
-# CORS - разрешаем запросы от backend
-CORS_ORIGINS = os.getenv(
-    "CORS_ORIGINS",
-    "http://localhost:8002"
-).split(",")
+# -------------------------------------------------
+# Lifespan - database initialization
+# -------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+
+
+# -------------------------------------------------
+# Application and CORS
+# -------------------------------------------------
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
+    allow_origins=["https://fiszkiadminpanelfrontend.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 # -------------------------------------------------
-# JWT и конфиг из окружения
+# JWT for admin authentication
 # -------------------------------------------------
 
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
+SECRET_KEY = os.getenv("SECRET_KEY", "jnUubi5NNKDkRd2neldQRikDcOeQ5MagGnRvsxki7sQ")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 RESET_CODE = os.getenv("RESET_CODE", "1111")
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/admin/login")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
 
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
@@ -67,19 +79,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def authenticate_admin(db: Session, login: str, password: str) -> Administrator | None:
-    admin = db.query(Administrator).filter(Administrator.login == login).first()
-    if not admin:
-        return None
-    if admin.password != password:
-        return None
-    return admin
-
-
-async def get_current_admin(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db),
-) -> Administrator:
+async def get_current_admin(token: str = Depends(oauth2_scheme)) -> dict:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -94,32 +94,52 @@ async def get_current_admin(
     except JWTError:
         raise credentials_exception
 
-    admin = db.query(Administrator).filter(Administrator.id_admin == int(admin_id)).first()
-    if admin is None:
-        raise credentials_exception
-    return admin
+    return {"id_admin": int(admin_id), "role": role}
+
 
 # -------------------------------------------------
-# Публичные эндпоинты (DB Service)
+# Health check
 # -------------------------------------------------
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+# -------------------------------------------------
+# Public endpoints
+# -------------------------------------------------
 
 @app.get("/levels", response_model=list[LevelOut])
-async def get_levels(db: Session = Depends(get_db)):
-    return db.query(Level).all()
+async def get_levels(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Level))
+    levels = result.scalars().all()
+    return levels
 
 
 @app.get("/levels/{level_id}/questions", response_model=list[QuestionOut])
-async def get_questions(level_id: int, db: Session = Depends(get_db)):
-    questions = db.query(Question).filter(Question.level_id == level_id).all()
-    if not questions:
+async def get_questions(level_id: int, db: AsyncSession = Depends(get_db)):
+    # Check if level exists
+    level = await db.get(Level, level_id)
+    if not level:
         raise HTTPException(status_code=404, detail="Level not found")
+
+    result = await db.execute(
+        select(Question)
+        .where(Question.level_id == level_id)
+        .options(selectinload(Question.answers))
+    )
+    questions = result.scalars().all()
     return questions
 
 
+# -------------------------------------------------
+# User endpoints
+# -------------------------------------------------
+
 @app.get("/user/{user_id}", response_model=UserOut)
-async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(Login).filter(Login.user_id == user_id).first()
+async def get_user_by_id(user_id: int, db: AsyncSession = Depends(get_db)):
+    user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -129,40 +149,42 @@ async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
 async def update_user_progress_by_id(
     user_id: int,
     new_progress: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    user = db.query(Login).filter(Login.user_id == user_id).first()
+    user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     user.progress = new_progress
-    db.commit()
-    db.refresh(user)
+    await db.commit()
+    await db.refresh(user)
     return user
 
 
 @app.post("/user/register", response_model=UserOut)
-async def register_user(data: UserCreate, db: Session = Depends(get_db)):
-    existing = db.query(Login).filter(Login.login == data.login).first()
-    if existing:
+async def register_user(data: UserCreate, db: AsyncSession = Depends(get_db)):
+    # Check if user already exists
+    result = await db.execute(select(User).where(User.login == data.login))
+    existing_user = result.scalar_one_or_none()
+    if existing_user:
         raise HTTPException(status_code=400, detail="User already exists")
 
-    user = Login(login=data.login, password=data.password, progress=0)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
+    hashed_password = get_password_hash(data.password)
+    new_user = User(login=data.login, password=hashed_password, progress=0)
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+    return new_user
 
 
 @app.post("/user/login", response_model=UserOut)
-async def login_user(data: UserLoginIn, db: Session = Depends(get_db)):
-    user = (
-        db.query(Login)
-        .filter(Login.login == data.login, Login.password == data.password)
-        .first()
-    )
-    if not user:
+async def login_user(data: UserLoginIn, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.login == data.login))
+    user = result.scalar_one_or_none()
+
+    if not user or not verify_password(data.password, user.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
     return user
 
 
@@ -170,15 +192,18 @@ async def login_user(data: UserLoginIn, db: Session = Depends(get_db)):
 async def change_password(
     user_id: int,
     data: UserChangePasswordIn,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    user = db.query(Login).filter(Login.user_id == user_id).first()
+    user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user.password = data.new_password
-    db.commit()
-    db.refresh(user)
+    if not verify_password(data.old_password, user.password):
+        raise HTTPException(status_code=400, detail="Invalid old password")
+
+    user.password = get_password_hash(data.new_password)
+    await db.commit()
+    await db.refresh(user)
     return user
 
 
@@ -186,51 +211,56 @@ async def change_password(
 async def change_login(
     user_id: int,
     data: UserChangeLoginIn,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    user = db.query(Login).filter(Login.user_id == user_id).first()
+    user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    existing = db.query(Login).filter(Login.login == data.new_login).first()
+    if not verify_password(data.password, user.password):
+        raise HTTPException(status_code=400, detail="Invalid password")
+
+    # Check if new login is already taken
+    result = await db.execute(select(User).where(User.login == data.new_login))
+    existing = result.scalar_one_or_none()
     if existing and existing.user_id != user_id:
         raise HTTPException(status_code=400, detail="Login already taken")
 
     user.login = data.new_login
-    db.commit()
-    db.refresh(user)
+    await db.commit()
+    await db.refresh(user)
     return user
 
 
 @app.post("/user/reset-password", response_model=UserOut)
-async def reset_password(
-    data: UserResetPasswordIn,
-    db: Session = Depends(get_db),
-):
+async def reset_password(data: UserResetPasswordIn, db: AsyncSession = Depends(get_db)):
     if data.code != RESET_CODE:
         raise HTTPException(status_code=400, detail="Invalid reset code")
 
-    user = db.query(Login).filter(Login.login == data.login).first()
+    result = await db.execute(select(User).where(User.login == data.login))
+    user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user.password = data.new_password
-    db.commit()
-    db.refresh(user)
+    user.password = get_password_hash(data.new_password)
+    await db.commit()
+    await db.refresh(user)
     return user
 
+
 # -------------------------------------------------
-# Админка
+# Admin login
 # -------------------------------------------------
 
-
-@app.post("/admin/login")
+@app.post("/admin/login", response_model=Token)
 async def admin_login(
     form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    admin = authenticate_admin(db, form_data.username, form_data.password)
-    if not admin:
+    result = await db.execute(select(Admin).where(Admin.login == form_data.username))
+    admin = result.scalar_one_or_none()
+
+    if not admin or not verify_password(form_data.password, admin.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid admin credentials",
@@ -242,43 +272,45 @@ async def admin_login(
         data={"sub": str(admin.id_admin), "role": "admin"},
         expires_delta=access_token_expires,
     )
-    return {"access_token": access_token, "token_type": "bearer"}
 
+    return Token(access_token=access_token, token_type="bearer")
+
+
+# -------------------------------------------------
+# Admin CRUD - Levels
+# -------------------------------------------------
 
 @app.get("/admin/levels", response_model=list[AdminLevelOut])
 async def admin_get_levels(
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    rows = (
-        db.query(
+    result = await db.execute(
+        select(
             Level.level_id,
             Level.level_name,
-            func.count(Question.question_id).label("questions_count"),
+            func.count(Question.question_id).label("questions_count")
         )
-        .outerjoin(Question, Question.level_id == Level.level_id)
-        .group_by(Level.level_id, Level.level_name)
-        .all()
+        .outerjoin(Question, Level.level_id == Question.level_id)
+        .group_by(Level.level_id)
     )
-
+    levels = result.all()
     return [
-        {
-            "level_id": r.level_id,
-            "level_name": r.level_name,
-            "questions_count": r.questions_count,
-        }
-        for r in rows
+        AdminLevelOut(level_id=l.level_id, level_name=l.level_name, questions_count=l.questions_count)
+        for l in levels
     ]
 
 
 @app.post("/admin/levels", response_model=LevelOut)
 async def admin_create_level(
     data: LevelCreate,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
     new_level = Level(level_name=data.level_name)
     db.add(new_level)
-    db.commit()
-    db.refresh(new_level)
+    await db.commit()
+    await db.refresh(new_level)
     return new_level
 
 
@@ -286,206 +318,222 @@ async def admin_create_level(
 async def admin_update_level(
     level_id: int,
     data: LevelUpdate,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    level = db.query(Level).filter(Level.level_id == level_id).first()
+    level = await db.get(Level, level_id)
     if not level:
         raise HTTPException(status_code=404, detail="Level not found")
 
     level.level_name = data.level_name
-    db.commit()
-    db.refresh(level)
+    await db.commit()
+    await db.refresh(level)
     return level
 
 
 @app.delete("/admin/levels/{level_id}")
 async def admin_delete_level(
     level_id: int,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    level = db.query(Level).filter(Level.level_id == level_id).first()
+    level = await db.get(Level, level_id)
     if not level:
         raise HTTPException(status_code=404, detail="Level not found")
 
-    db.delete(level)
-    db.commit()
+    await db.delete(level)
+    await db.commit()
     return {"detail": "Level deleted"}
 
 
+# -------------------------------------------------
+# Admin CRUD - Questions
+# -------------------------------------------------
+
 @app.get("/admin/questions", response_model=list[QuestionOut])
 async def admin_get_questions(
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    return db.query(Question).all()
+    result = await db.execute(
+        select(Question).options(selectinload(Question.answers))
+    )
+    questions = result.scalars().all()
+    return questions
 
 
 @app.post("/admin/questions", response_model=QuestionOut)
 async def admin_create_question(
     data: QuestionCreate,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    level = db.query(Level).filter(Level.level_id == data.level_id).first()
+    # Check if level exists
+    level = await db.get(Level, data.level_id)
     if not level:
         raise HTTPException(status_code=404, detail="Level not found")
 
-    q = Question(level_id=data.level_id, question=data.question)
-    db.add(q)
-    db.commit()
-    db.refresh(q)
-    return q
+    new_question = Question(question=data.question, level_id=data.level_id)
+    db.add(new_question)
+    await db.commit()
+    await db.refresh(new_question)
+
+    # Load answers relationship for response
+    result = await db.execute(
+        select(Question)
+        .where(Question.question_id == new_question.question_id)
+        .options(selectinload(Question.answers))
+    )
+    return result.scalar_one()
 
 
 @app.put("/admin/questions/{question_id}", response_model=QuestionOut)
 async def admin_update_question(
     question_id: int,
     data: QuestionUpdate,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    q = db.query(Question).filter(Question.question_id == question_id).first()
-    if not q:
+    question = await db.get(Question, question_id)
+    if not question:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    q.question = data.question
-    db.commit()
-    db.refresh(q)
-    return q
+    question.question = data.question
+    await db.commit()
+
+    # Load with answers
+    result = await db.execute(
+        select(Question)
+        .where(Question.question_id == question_id)
+        .options(selectinload(Question.answers))
+    )
+    return result.scalar_one()
 
 
 @app.delete("/admin/questions/{question_id}")
 async def admin_delete_question(
     question_id: int,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    q = db.query(Question).filter(Question.question_id == question_id).first()
-    if not q:
+    question = await db.get(Question, question_id)
+    if not question:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    db.delete(q)
-    db.commit()
+    await db.delete(question)
+    await db.commit()
     return {"detail": "Question deleted"}
 
 
+# -------------------------------------------------
+# Admin CRUD - Answers
+# -------------------------------------------------
+
 @app.get("/admin/answers", response_model=list[AnswerOut])
 async def admin_get_answers(
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    return db.query(Answer).all()
+    result = await db.execute(select(Answer))
+    answers = result.scalars().all()
+    return answers
 
 
 @app.post("/admin/answers", response_model=AnswerOut)
 async def admin_create_answer(
     data: AnswerCreate,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    q = db.query(Question).filter(Question.question_id == data.question_id).first()
-    if not q:
+    # Check if question exists
+    question = await db.get(Question, data.question_id)
+    if not question:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    a = Answer(
-        question_id=data.question_id,
+    new_answer = Answer(
         answer=data.answer,
         is_good=data.is_good,
+        question_id=data.question_id
     )
-    db.add(a)
-    db.commit()
-    db.refresh(a)
-    return a
+    db.add(new_answer)
+    await db.commit()
+    await db.refresh(new_answer)
+    return new_answer
 
 
 @app.put("/admin/answers/{answer_id}", response_model=AnswerOut)
 async def admin_update_answer(
     answer_id: int,
     data: AnswerUpdate,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    a = db.query(Answer).filter(Answer.answer_id == answer_id).first()
-    if not a:
+    answer = await db.get(Answer, answer_id)
+    if not answer:
         raise HTTPException(status_code=404, detail="Answer not found")
 
-    a.answer = data.answer
-    a.is_good = data.is_good
-    db.commit()
-    db.refresh(a)
-    return a
+    answer.answer = data.answer
+    answer.is_good = data.is_good
+    await db.commit()
+    await db.refresh(answer)
+    return answer
 
 
 @app.delete("/admin/answers/{answer_id}")
 async def admin_delete_answer(
     answer_id: int,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    a = db.query(Answer).filter(Answer.answer_id == answer_id).first()
-    if not a:
+    answer = await db.get(Answer, answer_id)
+    if not answer:
         raise HTTPException(status_code=404, detail="Answer not found")
 
-    db.delete(a)
-    db.commit()
+    await db.delete(answer)
+    await db.commit()
     return {"detail": "Answer deleted"}
 
 
+# -------------------------------------------------
+# Admin CRUD - Users
+# -------------------------------------------------
+
 @app.get("/admin/users", response_model=list[UserOut])
 async def admin_get_users(
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    return db.query(Login).all()
+    result = await db.execute(select(User))
+    users = result.scalars().all()
+    return users
 
 
 @app.put("/admin/users/{user_id}/reset-progress", response_model=UserOut)
 async def admin_reset_progress(
     user_id: int,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    user = db.query(Login).filter(Login.user_id == user_id).first()
+    user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     user.progress = 0
-    db.commit()
-    db.refresh(user)
+    await db.commit()
+    await db.refresh(user)
     return user
 
 
 @app.delete("/admin/users/{user_id}")
 async def admin_delete_user(
     user_id: int,
-    db: Session = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    user = db.query(Login).filter(Login.user_id == user_id).first()
+    user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    db.delete(user)
-    db.commit()
+    await db.delete(user)
+    await db.commit()
     return {"detail": "User deleted"}
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-from models import Base, Administrator
-from database import engine, SessionLocal
-
-
-# Создаём таблицы при старте
-@app.on_event("startup")
-def startup_event():
-    # Создаём все таблицы
-    Base.metadata.create_all(bind=engine)
-
-    # Создаём первого админа
-    db = SessionLocal()
-    try:
-        admin = db.query(Administrator).filter(Administrator.login == "admin").first()
-        if not admin:
-            new_admin = Administrator(
-                login="admin",
-                password="admin"
-            )
-            db.add(new_admin)
-            db.commit()
-            print("default admin created")
-    finally:
-        db.close()
-
